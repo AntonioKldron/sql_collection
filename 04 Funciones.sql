@@ -201,7 +201,10 @@ BEGIN
         SET @cleaned = STUFF(@json, @start - 1, LEN(@json) - @start + 2, '')
     ELSE
         SET @cleaned = STUFF(@json, @start, @end - @start + 1, '')
-
+    IF RIGHT(@cleaned, 1) = ','
+    BEGIN
+        SET @cleaned = LEFT(@cleaned, LEN(@cleaned) - 1) + '}'
+    END
     RETURN @cleaned
 END
 GO
