@@ -238,3 +238,141 @@ BEGIN
     END CATCH
 END
 GO
+/* =============================================
+--  Titulo: xpCA_UpsertFromJsonDynamic
+--  Autor:  José Antonio Cornelio Calderón
+--  Fecha:  12/11/2025
+--  Descripción: Inserta o actualiza dinámicamente en una tabla según si existe
+--               la combinación de llaves primarias definidas, usando valores de JSON.
+--  Parámetros:
+--      @json               -> Cadena JSON con los datos
+--      @table              -> Nombre de la tabla destino
+--      @jsonFields         -> Campos del JSON (separados por coma)
+--      @tableFields        -> Campos correspondientes de la tabla (mismo orden)
+--      @jsonLabelFunction  -> Función para obtener valores JSON (por ej. dbo.fnCA_JsonGetValueByPath)
+--      @primaryKeys        -> Campos que forman la llave primaria (separados por coma)
+--  Ejemplo:
+--      EXEC dbo.xpCA_UpsertFromJsonDynamic
+--          @json = '{"IdUsuario":1,"Nombre":"Antonio","Edad":28}',
+--          @table = 'Usuarios',
+--          @jsonFields = 'IdUsuario,Nombre,Edad',
+--          @tableFields = 'IdUsuario,Nombre,Edad',
+--          @jsonLabelFunction = 'dbo.fnCA_JsonGetValueByPath',
+--          @primaryKeys = 'IdUsuario'
+==============================================*/
+CREATE PROCEDURE [dbo].[xpCA_UpsertFromJsonDynamic]
+    @json               VARCHAR(MAX),
+    @table              SYSNAME,
+    @jsonFields         VARCHAR(MAX),
+    @tableFields        VARCHAR(MAX),
+    @jsonLabelFunction  SYSNAME,
+    @primaryKeys        VARCHAR(MAX)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        DECLARE 
+            @sql NVARCHAR(MAX) = '',
+            @where NVARCHAR(MAX) = '',
+            @exists INT = 0,
+            @pkField VARCHAR(200),
+            @pkValue NVARCHAR(MAX);
+
+        ------------------------------------------------------------------
+        -- Validar existencia de campos
+        ------------------------------------------------------------------
+        IF dbo.fnCA_ValidateTableFieldsExist(@table, @tableFields) = 0
+        BEGIN
+            RAISERROR('Uno o más campos en @tableFields no existen en la tabla %s.', 16, 1, @table);
+            RETURN;
+        END
+
+        ------------------------------------------------------------------
+        -- Armar condiciones dinámicas de llave primaria
+        ------------------------------------------------------------------
+        DECLARE @pk TABLE (FieldName VARCHAR(200), Value NVARCHAR(MAX));
+        DECLARE pk_cursor CURSOR FOR
+            SELECT LTRIM(RTRIM(name)) FROM dbo.fnCA_StringSplit(@primaryKeys, ',');
+
+        OPEN pk_cursor;
+        FETCH NEXT FROM pk_cursor INTO @pkField;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            DECLARE @query NVARCHAR(MAX) =
+                N'SELECT @out = ' + @jsonLabelFunction + '(@json, @key)';
+            
+            EXEC sp_executesql
+                @query,
+                N'@json VARCHAR(MAX), @key VARCHAR(200), @out NVARCHAR(MAX) OUTPUT',
+                @json = @json,
+                @key = @pkField,
+                @out = @pkValue OUTPUT;
+
+            IF @pkValue IS NULL OR LTRIM(RTRIM(@pkValue)) = ''
+                SET @pkValue = 'NULL';
+
+            INSERT INTO @pk VALUES(@pkField, @pkValue);
+            FETCH NEXT FROM pk_cursor INTO @pkField;
+        END
+
+        CLOSE pk_cursor;
+        DEALLOCATE pk_cursor;
+
+        SELECT @where = STRING_AGG(
+            QUOTENAME(FieldName) + ' = ' + 
+            CASE WHEN Value = 'NULL' THEN 'NULL' ELSE '''' + REPLACE(Value, '''', '''''') + '''' END,
+            ' AND '
+        )
+        FROM @pk;
+
+        ------------------------------------------------------------------
+        -- Validar si el registro existe
+        ------------------------------------------------------------------
+        DECLARE @existSql NVARCHAR(MAX) = 
+            N'SELECT @exists = COUNT(*) FROM ' + QUOTENAME(@table) + ' WHERE ' + @where;
+
+        EXEC sp_executesql @existSql, N'@exists INT OUTPUT', @exists OUTPUT;
+
+        ------------------------------------------------------------------
+        -- Decidir si INSERT o UPDATE
+        ------------------------------------------------------------------
+        IF @exists = 0
+        BEGIN
+            -- Inserta si no existe
+            EXEC dbo.xpCA_InsertFromJsonDynamic
+                @json = @json,
+                @table = @table,
+                @jsonFields = @jsonFields,
+                @tableFields = @tableFields,
+                @jsonLabelFunction = @jsonLabelFunction;
+
+            PRINT 'Registro insertado correctamente.';
+        END
+        ELSE
+        BEGIN
+            -- Actualiza si ya existe
+            DECLARE @whereClause NVARCHAR(MAX) = 'WHERE ' + @where;
+
+            EXEC dbo.xpCA_UpdateFromJsonDynamic
+                @json = @json,
+                @table = @table,
+                @jsonFields = @jsonFields,
+                @tableFields = @tableFields,
+                @whereCondition = @whereClause,
+                @jsonLabelFunction = @jsonLabelFunction;
+
+            PRINT 'Registro actualizado correctamente.';
+        END
+    END TRY
+    BEGIN CATCH
+        PRINT 'Error en xpCA_UpsertFromJsonDynamic';
+        PRINT 'Mensaje: ' + ERROR_MESSAGE();
+        PRINT 'Número: ' + CAST(ERROR_NUMBER() AS VARCHAR);
+        PRINT 'Línea: ' + CAST(ERROR_LINE() AS VARCHAR);
+        PRINT 'Procedimiento: ' + ISNULL(ERROR_PROCEDURE(), 'N/A');
+    END CATCH
+END
+GO
+
