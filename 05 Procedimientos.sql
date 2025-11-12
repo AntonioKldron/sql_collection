@@ -1,6 +1,6 @@
 /* =============================================
 --  Titulo: xpCA_InsertFromJsonDynamic
---  Author: JOSE ANTONIO CORNELIO CALDERON
+--  Autor:  José Antonio Cornelio Calderón
 --  Creación: 23/07/2025
 --  Descripción: Método para insertar datos dinámicamente en una tabla a partir de un JSON, 
 --               utilizando campos mapeados de forma dinámica.
@@ -48,33 +48,28 @@ BEGIN
             IsNullable  BIT
         );
 
-
         DECLARE @jsonField VARCHAR(200), @tableField VARCHAR(200), @val NVARCHAR(MAX);
 
         DECLARE field_cursor CURSOR FAST_FORWARD FOR
-			WITH JsonFieldsCTE AS (
-				SELECT
-					LTRIM(RTRIM(jf.name)) AS JsonField,
-					-- Asigna un índice de posición
-					ROW_NUMBER() OVER (ORDER BY (SELECT 1)) AS RowNum
-				FROM dbo.fnCA_StringSplit(@jsonFields, ',') jf
-			),
-			TableFieldsCTE AS (
-				SELECT
-					LTRIM(RTRIM(tf.name)) AS TableField,
-					-- Asigna un índice de posición
-					ROW_NUMBER() OVER (ORDER BY (SELECT 1)) AS RowNum
-				FROM dbo.fnCA_StringSplit(@tableFields, ',') tf
-			)
-			SELECT
-				j.JsonField AS Campo_JSON,
-				t.TableField AS Campo_Tabla
-			FROM
-				JsonFieldsCTE j
-			FULL OUTER JOIN -- Usa FULL OUTER JOIN para incluir elementos si una lista es más larga que la otra
-				TableFieldsCTE t ON j.RowNum = t.RowNum
-			ORDER BY
-				COALESCE(j.RowNum, t.RowNum); -- Ordena por el índice compartido
+        WITH JsonFieldsCTE AS (
+            SELECT
+                LTRIM(RTRIM(jf.name)) AS JsonField,
+                ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS RowNum
+            FROM dbo.fnCA_StringSplit(@jsonFields, ',') jf
+        ),
+        TableFieldsCTE AS (
+            SELECT
+                LTRIM(RTRIM(tf.name)) AS TableField,
+                ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS RowNum
+            FROM dbo.fnCA_StringSplit(@tableFields, ',') tf
+        )
+        SELECT
+            j.JsonField AS Campo_JSON,
+            t.TableField AS Campo_Tabla
+        FROM JsonFieldsCTE j
+        FULL OUTER JOIN TableFieldsCTE t
+            ON j.RowNum = t.RowNum
+        ORDER BY ISNULL(j.RowNum, t.RowNum);
 
         OPEN field_cursor;
         FETCH NEXT FROM field_cursor INTO @jsonField, @tableField;
@@ -137,20 +132,24 @@ BEGIN
         DEALLOCATE field_cursor;
 
         ------------------------------------------------------------------
-        -- Construir el INSERT dinámico
+        -- Construir el INSERT dinámico (compatible con SQL Server 2014+)
         ------------------------------------------------------------------
         SELECT 
-            @columns = STRING_AGG(QUOTENAME(TableField), ','),
-            @values  = STRING_AGG(
-                CASE 
-                    WHEN DataType IN ('int','bigint','decimal','numeric','float','bit') 
-                        THEN ISNULL(Value, '0')
-                    WHEN DataType LIKE '%date%' 
-                        THEN 'CAST(''' + ISNULL(Value, '1900-01-01') + ''' AS DATETIME)'
-                    ELSE '''' + REPLACE(ISNULL(Value, ''), '''', '''''') + ''''
-                END, 
-            ',')
-        FROM @FieldTable;
+            @columns = STUFF((
+                SELECT ',' + QUOTENAME(TableField)
+                FROM @FieldTable
+                FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
+            @values = STUFF((
+                SELECT ',' + 
+                    CASE 
+                        WHEN DataType IN ('int','bigint','decimal','numeric','float','bit') 
+                            THEN ISNULL(Value, '0')
+                        WHEN DataType LIKE '%date%' 
+                            THEN 'CAST(''' + ISNULL(Value, '1900-01-01') + ''' AS DATETIME)'
+                        ELSE '''' + REPLACE(ISNULL(Value, ''), '''', '''''') + ''''
+                    END
+                FROM @FieldTable
+                FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, '');
 
         SET @sql = N'INSERT INTO ' + QUOTENAME(@table) + '(' + @columns + ') VALUES (' + @values + ');';
 
