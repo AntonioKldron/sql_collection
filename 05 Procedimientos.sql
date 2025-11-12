@@ -374,4 +374,136 @@ BEGIN
     END CATCH
 END
 GO
+/* =============================================
+--  Título: xpCA_UpsertFromJsonArrayDynamic
+--  Autor:  José Antonio Cornelio Calderón
+--  Fecha:  12/11/2025
+--  Descripción:
+--      Procesa un arreglo JSON (sin ISJSON) y ejecuta el procedimiento
+--      xpCA_UpsertFromJsonDynamic para cada elemento del arreglo.
+--      Incluye manejo seguro de cursores y limpieza de recursos en caso de error.
+=============================================*/
+CREATE PROCEDURE [dbo].[xpCA_UpsertFromJsonArrayDynamic]
+    @jsonArray          NVARCHAR(MAX),
+    @table              SYSNAME,
+    @jsonFields         VARCHAR(MAX),
+    @tableFields        VARCHAR(MAX),
+    @jsonLabelFunction  SYSNAME,
+    @primaryKeys        VARCHAR(MAX)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE 
+        @currentJson NVARCHAR(MAX),
+        @count INT = 0,
+        @cursorOpened BIT = 0;
+
+    BEGIN TRY
+        ------------------------------------------------------------------
+        -- Validar formato básico del JSON (sin usar ISJSON)
+        ------------------------------------------------------------------
+        IF @jsonArray IS NULL OR LTRIM(RTRIM(@jsonArray)) = ''
+        BEGIN
+            RAISERROR('El parámetro @jsonArray está vacío o es nulo.', 16, 1);
+            RETURN;
+        END
+
+        IF LEFT(LTRIM(@jsonArray), 1) <> '[' OR RIGHT(RTRIM(@jsonArray), 1) <> ']'
+        BEGIN
+            RAISERROR('El parámetro @jsonArray no parece ser un arreglo JSON válido.', 16, 1);
+            RETURN;
+        END
+
+        ------------------------------------------------------------------
+        -- Crear tabla temporal
+        ------------------------------------------------------------------
+        IF OBJECT_ID('tempdb..#TmpJsonItems') IS NOT NULL
+            DROP TABLE #TmpJsonItems;
+
+        CREATE TABLE #TmpJsonItems (Item NVARCHAR(MAX));
+
+        ------------------------------------------------------------------
+        -- Separar los objetos del arreglo (método compatible con SQL 2012)
+        ------------------------------------------------------------------
+        DECLARE @work NVARCHAR(MAX) = SUBSTRING(@jsonArray, 2, LEN(@jsonArray) - 2); -- quitar []
+        DECLARE @pos INT = 1, @len INT = LEN(@work), @level INT = 0, @start INT = 1;
+        DECLARE @ch NCHAR(1), @jsonObj NVARCHAR(MAX);
+
+        WHILE @pos <= @len
+        BEGIN
+            SET @ch = SUBSTRING(@work, @pos, 1);
+
+            IF @ch = '{' SET @level += 1;
+            IF @ch = '}' SET @level -= 1;
+
+            IF @level = 0 AND @ch = '}'
+            BEGIN
+                SET @jsonObj = LTRIM(RTRIM(SUBSTRING(@work, @start, @pos - @start + 1)));
+                INSERT INTO #TmpJsonItems (Item) VALUES (@jsonObj);
+
+                -- Buscar siguiente objeto
+                SET @pos = CHARINDEX('{', @work, @pos + 1);
+                IF @pos = 0 BREAK;
+                SET @start = @pos;
+                CONTINUE;
+            END
+
+            SET @pos += 1;
+        END
+
+        ------------------------------------------------------------------
+        -- Cursor para recorrer cada elemento del arreglo
+        ------------------------------------------------------------------
+        DECLARE json_cursor CURSOR LOCAL FAST_FORWARD FOR
+            SELECT Item FROM #TmpJsonItems;
+
+        OPEN json_cursor;
+        SET @cursorOpened = 1;
+
+        FETCH NEXT FROM json_cursor INTO @currentJson;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            SET @count += 1;
+
+            EXEC dbo.xpCA_UpsertFromJsonDynamic
+                @json = @currentJson,
+                @table = @table,
+                @jsonFields = @jsonFields,
+                @tableFields = @tableFields,
+                @jsonLabelFunction = @jsonLabelFunction,
+                @primaryKeys = @primaryKeys;
+
+            FETCH NEXT FROM json_cursor INTO @currentJson;
+        END
+
+        CLOSE json_cursor;
+        DEALLOCATE json_cursor;
+        SET @cursorOpened = 0;
+
+        PRINT CONCAT('Procesamiento completado. Total de elementos: ', @count);
+
+    END TRY
+    BEGIN CATCH
+        ------------------------------------------------------------------
+        -- Limpieza segura en caso de error
+        ------------------------------------------------------------------
+        IF @cursorOpened = 1
+        BEGIN
+            CLOSE json_cursor;
+            DEALLOCATE json_cursor;
+        END
+
+        IF OBJECT_ID('tempdb..#TmpJsonItems') IS NOT NULL
+            DROP TABLE #TmpJsonItems;
+
+        PRINT 'Error en xpCA_UpsertFromJsonArrayDynamic';
+        PRINT 'Mensaje: ' + ERROR_MESSAGE();
+        PRINT 'Número: ' + CAST(ERROR_NUMBER() AS VARCHAR);
+        PRINT 'Línea: ' + CAST(ERROR_LINE() AS VARCHAR);
+        PRINT 'Procedimiento: ' + ISNULL(ERROR_PROCEDURE(), 'N/A');
+    END CATCH
+END
+GO
 
